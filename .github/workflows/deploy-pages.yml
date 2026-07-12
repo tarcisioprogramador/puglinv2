@@ -40,6 +40,8 @@ jobs:
 
       - name: Build
         run: npm run build:prod
+        env:
+          VITE_BASE_URL: /puglinv2/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
