@@ -18,7 +18,8 @@ const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
 const TK = 'prospector_token';
 const RTK = 'prospector_refresh';
-const BASE = '/api';
+const API_URL = import.meta.env.VITE_API_URL || '';
+const BASE = API_URL ? `${API_URL}/api` : '/api';
 
 let refreshPromise: Promise<boolean> | null = null;
 
