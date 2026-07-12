@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+frontend/dist/
+backend/dist/
+
+# Database
+*.db
+*.db-bak
+*.db-wal
+*.db-shm
+data/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+
+# Temp
+tmp/
+temp/
+
+# Vite cache
+.vite/
+
+# Windows reserved names
+nul
+NUL
+Nul
+
+# Test files
+test.txt
