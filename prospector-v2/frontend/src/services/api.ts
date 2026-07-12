@@ -1,4 +1,6 @@
-const BASE = '/api';
+// Em produção (GitHub Pages), usa a URL do Render. Em dev, usa proxy do Vite.
+const API_URL = import.meta.env.VITE_API_URL || '';
+const BASE = API_URL ? `${API_URL}/api` : '/api';
 
 function getHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json' };

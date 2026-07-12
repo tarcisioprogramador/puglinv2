@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Redirecionando...</title>
+  <script>
+    // Redireciona para o index.html mantendo o path para o React SPA
+    var base = document.querySelector('base')?.getAttribute('href') || '/';
+    var path = window.location.pathname.replace(base, '');
+    sessionStorage.setItem('redirectPath', path);
+    window.location.replace(base);
+  </script>
+</head>
+<body>
+  <p>Redirecionando para o aplicativo...</p>
+</body>
+</html>
