@@ -6,7 +6,7 @@ let initialized = false;
 const DATABASE_URL = () => process.env.DATABASE_URL || '';
 
 function getPool(): Pool {
-  if (!initialized) throw new Error('Database not initialized');
+  if (!pool) throw new Error('Database not initialized');
   return pool;
 }
 
@@ -135,8 +135,8 @@ async function initSchema(): Promise<void> {
 export async function initDb(): Promise<void> {
   if (initialized) return;
   pool = new Pool({ connectionString: DATABASE_URL(), ssl: { rejectUnauthorized: false } });
-  await initSchema();
   initialized = true;
+  await initSchema();
 }
 
 export function getDb(): any {
