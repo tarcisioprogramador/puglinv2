@@ -7,6 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "db:init": "tsx src/database.ts --init",
+    "seed": "tsx src/seed.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
