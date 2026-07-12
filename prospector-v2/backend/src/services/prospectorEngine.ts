@@ -252,10 +252,11 @@ class ProspectorEngine {
       ? analysis.emailsEncontrados[0]
       : null;
 
-    db.run(
-      `INSERT OR IGNORE INTO leads
+    await db.run(
+      `INSERT INTO leads
       (slug, nome, nicho, cidade, nota, avaliacoes, telefone, whatsapp, siteAntigo, motivo, status, email)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      ON CONFLICT (slug) DO NOTHING`,
       [
         slug, biz.nome, job.nicho, job.cidade,
         biz.nota, biz.avaliacoes,

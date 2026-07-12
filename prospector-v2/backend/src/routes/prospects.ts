@@ -1,147 +1,83 @@
 import { Router, Request, Response } from 'express';
 import { getDb } from '../database';
+import { prospectorEngine as engine } from '../services/prospectorEngine';
 import { v4 as uuidv4 } from 'uuid';
-import { prospectorEngine } from '../services/prospectorEngine';
 
 const router = Router();
 
-function slugify(t: string) { return t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); }
+const CAMPOS = ['slug','nome','nicho','cidade','nota','avaliacoes','email','telefone','whatsapp','siteAntigo','motivo','status'];
 
-// Existing: search (manual instructions)
+function slugify(text: string): string {
+  return text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
 router.post('/search', async (req: Request, res: Response) => {
   try {
     const { nicho, cidade, quantidade = 10 } = req.body;
-    if (!nicho || !cidade) return res.status(400).json({ success: false, error: 'Nicho e cidade obrigatórios' });
-    getDb().prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES (?,?,?)').run('_prospeccao','prospeccao_iniciada',`Prospecção para "${nicho}" em "${cidade}"`);
-    res.json({ success: true, message: `Prospecção iniciada para "${nicho}" em "${cidade}"`, data: { nicho, cidade, quantidade } });
+    if (!nicho || !cidade) return res.status(400).json({ success: false, error: 'Nicho e cidade são obrigatórios' });
+    await getDb().prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES ($1,$2,$3)').run('_prospeccao','prospeccao_iniciada',`Prospecção para "${nicho}" em "${cidade}"`);
+    const jobId = engine.createJob(nicho, cidade, Math.min(quantidade, 50));
+    const sites: any[] = [];
+    const unsub = engine.onEvent(jobId, (ev: any) => {
+      if (ev.type === 'result' && ev.data?.empresa) sites.push(ev.data.empresa);
+      if (ev.type === 'complete' || ev.type === 'error') setTimeout(unsub, 100);
+    });
+    // Wait briefly for results
+    await new Promise(r => setTimeout(r, 3000));
+    res.json({ success: true, data: sites });
   } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// Existing: import manually
-router.post('/import', (req: Request, res: Response) => {
+router.post('/import', async (req: Request, res: Response) => {
   try {
     const db = getDb(); const { prospects, nicho, cidade } = req.body;
-    if (!prospects?.length) return res.status(400).json({ success: false, error: 'Lista vazia' });
-    const CAMPOS = ['slug','nome','nicho','cidade','nota','avaliacoes','email','telefone','whatsapp','siteAntigo','motivo','status'];
-    const stmt = db.prepare(`INSERT OR IGNORE INTO leads (${CAMPOS.join(',')}) VALUES (${CAMPOS.map(()=>'?').join(',')})`);
+    if (!prospects?.length) return res.status(400).json({ success: false, error: 'Nenhum prospect para importar' });
     let imp = 0, skip = 0;
-    db.transaction(() => { for (const p of prospects) { const slug = slugify(p.nome)+'-'+uuidv4().substring(0,8); const r = stmt.run(slug,p.nome,nicho||null,cidade||null,p.nota||null,p.avaliacoes||null,p.email||null,p.telefone||null,p.whatsapp||null,p.siteAntigo||null,p.motivo||null,p.qualificado?'novo':'descartado'); if (r.changes>0) imp++; else skip++; } })();
-    res.json({ success: true, data: { importados: imp, ignorados: skip, total: prospects.length }, message: `${imp} leads importados` });
+    const ph = CAMPOS.map((_, i) => '$' + (i + 1)).join(',');
+    const stmt = `INSERT INTO leads (${CAMPOS.join(',')}) VALUES (${ph}) ON CONFLICT (slug) DO NOTHING`;
+    await db.transaction(async () => {
+      for (const p of prospects) {
+        if (!p.nome) continue;
+        const slug = slugify(p.nome) + '-' + uuidv4().substring(0, 8);
+        const r = await db.prepare(stmt).run(slug, p.nome, nicho || null, cidade || null, p.nota || null, p.avaliacoes || null, p.email || null, p.telefone || null, p.whatsapp || null, p.siteAntigo || null, p.motivo || null, p.qualificado ? 'novo' : 'descartado');
+        if (r.changes > 0) imp++; else skip++;
+      }
+    });
+    await db.prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES ($1,$2,$3)').run('_prospeccao','prospeccao',`Importados ${imp} prospects${nicho?` para "${nicho}"`:''}${cidade?` em "${cidade}"`:''} (${skip} duplicados ignorados)`);
+    res.json({ success: true, data: { importados: imp, ignorados: skip } });
   } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// NEW: Auto-prospecting - start the pipeline
 router.post('/auto-prospectar', async (req: Request, res: Response) => {
   try {
     const { nicho, cidade, quantidade = 10 } = req.body;
-    if (!nicho || !cidade) {
-      return res.status(400).json({ success: false, error: 'Nicho e cidade são obrigatórios' });
-    }
-    if (quantidade < 1 || quantidade > 100) {
-      return res.status(400).json({ success: false, error: 'Quantidade deve estar entre 1 e 100' });
-    }
-    if (prospectorEngine.isBusy) {
-      return res.status(429).json({ success: false, error: 'Já existe uma prospecção em andamento. Aguarde finalizar.' });
-    }
-
-    const jobId = prospectorEngine.createJob(nicho, cidade, quantidade);
-
-    // Log activity
-    try {
-      getDb().prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES (?,?,?)').run(
-        '_prospeccao_auto', 'prospeccao_auto',
-        `Prospecção automática: "${nicho}" em "${cidade}" (até ${quantidade} leads) — Job #${jobId}`
-      );
-    } catch {}
-
-    res.json({
-      success: true,
-      message: 'Prospecção automática iniciada!',
-      data: { jobId, nicho, cidade, quantidade }
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+    if (!nicho || !cidade) return res.status(400).json({ success: false, error: 'Nicho e cidade são obrigatórios' });
+    const jobId = engine.createJob(nicho, cidade, quantidade);
+    await getDb().prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES ($1,$2,$3)').run('_prospeccao','prospeccao_auto',`Prospecção automática para "${nicho}" em "${cidade}"`);
+    res.json({ success: true, data: { jobId, message: 'Prospecção iniciada' } });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// NEW: SSE stream for real-time status
 router.get('/prospectar/:jobId/stream', (req: Request, res: Response) => {
   const { jobId } = req.params;
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  const unsubscribe = engine.onEvent(jobId, (data: any) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (data.type === 'complete' || data.type === 'error') { res.end(); unsubscribe(); }
   });
-
-  // Send initial status
-  const job = prospectorEngine.getJob(jobId);
-  if (!job) {
-    res.write(`data: ${JSON.stringify({ type: 'error', data: { message: 'Job não encontrado' } })}\n\n`);
-    res.end();
-    return;
-  }
-
-  res.write(`data: ${JSON.stringify({ type: 'status', data: job })}\n\n`);
-
-  // Listen for events
-  const cleanup = prospectorEngine.onEvent(jobId, (event) => {
-    try {
-      res.write(`data: ${JSON.stringify(event)}\n\n`);
-      
-      // If complete or error, close the stream
-      if (event.type === 'complete' || event.type === 'error') {
-        cleanup();
-        res.end();
-      }
-    } catch {
-      cleanup();
-    }
-  });
-
-  // Cleanup on client disconnect
-  req.on('close', () => {
-    cleanup();
-    prospectorEngine.cleanup(jobId);
-  });
+  req.on('close', () => unsubscribe());
 });
 
-// NEW: Get job status (for polling fallback)
-router.get('/prospectar/:jobId', (req: Request, res: Response) => {
-  const { jobId } = req.params;
-  const job = prospectorEngine.getJob(jobId);
-
-  if (!job) {
-    return res.status(404).json({ success: false, error: 'Job não encontrado ou expirado' });
-  }
-
-  res.json({ success: true, data: job });
+router.get('/prospectar/:jobId', async (req: Request, res: Response) => {
+  try {
+    const job = engine.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ success: false, error: 'Job não encontrado ou expirado' });
+    res.json({ success: true, data: job });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// Existing: get criteria
-router.get('/criteria', (_req: Request, res: Response) => {
-  res.json({
-    success: true,
-    data: {
-      notaMinima: 4.7,
-      avaliacoesMinimas: 40,
-      criteriosQualificacao: [
-        'Layout antigo',
-        'Falta de CTA',
-        'Subdomínio gratuito',
-        'Má responsividade',
-        'Conteúdo desorganizado',
-        'Sem prova social',
-      ],
-      criteriosDescarte: [
-        'Sem site próprio',
-        'Site fora do ar',
-        'Site já é bom',
-        'Sem contato público',
-      ],
-    },
-  });
+router.get('/criteria', async (_req: Request, res: Response) => {
+  res.json({ success: true, data: { nichoPadrao: '', cidadePadrao: '', volumeLeads: 10 } });
 });
 
 export default router;

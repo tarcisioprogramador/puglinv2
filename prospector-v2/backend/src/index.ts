@@ -93,5 +93,5 @@ async function start() {
 }
 start().catch(console.error);
 
-process.on('SIGINT', () => { closeDb(); process.exit(0); });
-process.on('SIGTERM', () => { closeDb(); process.exit(0); });
+process.on('SIGINT', async () => { await closeDb(); process.exit(0); });
+process.on('SIGTERM', async () => { await closeDb(); process.exit(0); });

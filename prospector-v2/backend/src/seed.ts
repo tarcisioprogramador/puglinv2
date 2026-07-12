@@ -13,7 +13,7 @@ async function seed() {
   const db = getDb();
 
   // Verifica se já existe admin
-  const existing = db.prepare('SELECT COUNT(*) as c FROM usuarios').get() as any;
+  const existing = await db.prepare('SELECT COUNT(*) as c FROM usuarios').get() as any;
   if (existing?.c > 0) {
     console.log('⚠️  Já existe um usuário cadastrado. Pulando criação de admin.\n');
   } else {
@@ -25,7 +25,7 @@ async function seed() {
     const hash = await bcrypt.hash(senha, salt);
     const slug = email.toLowerCase().replace(/[^a-z0-9]/g, '-');
 
-    db.prepare('INSERT INTO usuarios (slug, email, nome, hash) VALUES (?, ?, ?, ?)').run(slug, email.toLowerCase(), nome, hash);
+    await db.prepare('INSERT INTO usuarios (slug, email, nome, hash) VALUES ($1, $2, $3, $4)').run(slug, email.toLowerCase(), nome, hash);
     console.log(`✅ Admin criado com sucesso!`);
     console.log(`   Email: ${email}`);
     console.log(`   Senha: ${senha}`);
@@ -40,15 +40,15 @@ async function seed() {
   };
 
   for (const [chave, valor] of Object.entries(configPadrao)) {
-    const exist = db.prepare('SELECT COUNT(*) as c FROM config WHERE chave = ?').get(chave) as any;
+    const exist = await db.prepare('SELECT COUNT(*) as c FROM config WHERE chave = $1').get(chave) as any;
     if (!exist?.c) {
-      db.prepare('INSERT INTO config (chave, valor) VALUES (?, ?)').run(chave, JSON.stringify(valor));
+      await db.prepare('INSERT INTO config (chave, valor) VALUES ($1, $2)').run(chave, JSON.stringify(valor));
       console.log(`📋 Config padrão "${chave}" criada.`);
     }
   }
 
   console.log('\n✅ Seed concluído!\n');
-  closeDb();
+  await closeDb();
   process.exit(0);
 }
 

@@ -1,45 +1,151 @@
-import initSqlJs from 'sql.js';
-import path from 'path';
-import fs from 'fs';
+import { Pool } from 'pg';
 
-const DEFAULT_PATH = path.join(__dirname, '../../data/prospector.db');
-const getDbPath = () => process.env.DB_PATH || DEFAULT_PATH;
-let SQL: any; let db: any; let initialized = false;
+let pool: Pool;
+let initialized = false;
 
-class Statement {
-  constructor(private d: any, private sql: string) {}
-  get(...p: any[]): any { try{const s=this.d.prepare(this.sql);if(p.length>0)s.bind(p);if(s.step()){const r=s.getAsObject();s.free();return r}s.free();return undefined}catch{return undefined} }
-  all(...p: any[]): any[] { const s=this.d.prepare(this.sql);if(p.length>0)s.bind(p);const r=[];while(s.step())r.push(s.getAsObject());s.free();return r; }
-  run(...p: any[]): any { try{this.d.run(this.sql,p);return{changes:this.d.getRowsModified()}}catch{return{changes:0}} }
+const DATABASE_URL = () => process.env.DATABASE_URL || '';
+
+function getPool(): Pool {
+  if (!initialized) throw new Error('Database not initialized');
+  return pool;
 }
 
-function saveDb(): void { const dbPath = getDbPath(); const d=db.export();const dir=path.dirname(dbPath);if(!fs.existsSync(dir))fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(dbPath,Buffer.from(d)); }
+class Statement {
+  constructor(private p: Pool, private sql: string) {}
 
-function wrapDb(d: any): any {
-  return new Proxy({}, { get(_t:any,prop:string) {
-    if(prop==='prepare') return (sql:string)=>new Statement(d,sql);
-    if(prop==='run') return (sql:string,p?:any[])=>{d.run(sql,p||[]);saveDb()};
-    if(prop==='exec') return (sql:string)=>{d.exec(sql);saveDb()};
-    if(prop==='transaction') return (fn:Function)=>{d.exec('BEGIN');try{fn();d.exec('COMMIT');saveDb()}catch(e){d.exec('ROLLBACK');throw e}};
-    return (d as any)[prop];
+  async get(...params: any[]): Promise<any> {
+    try {
+      const res = await this.p.query(this.sql, params);
+      return res.rows[0] || undefined;
+    } catch { return undefined; }
+  }
+
+  async all(...params: any[]): Promise<any[]> {
+    try {
+      const res = await this.p.query(this.sql, params);
+      return res.rows;
+    } catch { return []; }
+  }
+
+  async run(...params: any[]): Promise<any> {
+    try {
+      const res = await this.p.query(this.sql, params);
+      return { changes: res.rowCount || 0 };
+    } catch { return { changes: 0 }; }
+  }
+}
+
+function wrapDb(p: Pool): any {
+  return new Proxy({}, { get(_t: any, prop: string) {
+    if (prop === 'prepare') return (sql: string) => new Statement(p, sql);
+    if (prop === 'run') return async (sql: string, params?: any[]) => { await p.query(sql, params || []); };
+    if (prop === 'exec') return async (sql: string) => { await p.query(sql); };
+    if (prop === 'transaction') return async (fn: Function) => {
+      const client = await p.connect();
+      try {
+        await client.query('BEGIN');
+        await fn();
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    };
+    return (p as any)[prop];
   }});
 }
 
-function initSchema(): void {
-  db.run(`CREATE TABLE IF NOT EXISTS leads (slug TEXT PRIMARY KEY, nome TEXT NOT NULL, nicho TEXT, cidade TEXT, nota REAL, avaliacoes INTEGER, email TEXT, telefone TEXT, whatsapp TEXT, siteAntigo TEXT, motivo TEXT, status TEXT DEFAULT 'novo', urlNova TEXT, dataProposta TEXT, valor REAL, obs TEXT, contratoStatus TEXT DEFAULT 'pendente', contratoEm TEXT, manutencao REAL, pago INTEGER DEFAULT 0, docCliente TEXT, endCliente TEXT, atualizado TEXT DEFAULT (datetime('now','localtime')), criadoEm TEXT DEFAULT (datetime('now','localtime')))`);
-  db.run(`CREATE TABLE IF NOT EXISTS config (chave TEXT PRIMARY KEY, valor TEXT NOT NULL, atualizado TEXT DEFAULT (datetime('now','localtime')))`);
-  db.run(`CREATE TABLE IF NOT EXISTS atividades (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, tipo TEXT NOT NULL, descricao TEXT NOT NULL, criadoEm TEXT DEFAULT (datetime('now','localtime')))`);
-  db.run(`CREATE TABLE IF NOT EXISTS usuarios (slug TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, hash TEXT NOT NULL, criadoEm TEXT DEFAULT (datetime('now','localtime')))`);
-  db.run(`CREATE TABLE IF NOT EXISTS refresh_tokens (token TEXT PRIMARY KEY, user_slug TEXT NOT NULL, expires TEXT NOT NULL, criadoEm TEXT DEFAULT (datetime('now','localtime')))`);
-  db.run(`CREATE TABLE IF NOT EXISTS sites_cache (slug TEXT PRIMARY KEY, htmlOriginal TEXT, htmlRedesenhado TEXT, htmlEditor TEXT, screenshots TEXT, atualizado TEXT DEFAULT (datetime('now','localtime')))`);
-  saveDb();
+async function initSchema(): Promise<void> {
+  const p = getPool();
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS leads (
+      slug TEXT PRIMARY KEY,
+      nome TEXT NOT NULL,
+      nicho TEXT,
+      cidade TEXT,
+      nota REAL,
+      avaliacoes INTEGER,
+      email TEXT,
+      telefone TEXT,
+      whatsapp TEXT,
+      siteAntigo TEXT,
+      motivo TEXT,
+      status TEXT DEFAULT 'novo',
+      urlNova TEXT,
+      dataProposta TEXT,
+      valor REAL,
+      obs TEXT,
+      contratoStatus TEXT DEFAULT 'pendente',
+      contratoEm TEXT,
+      manutencao REAL,
+      pago INTEGER DEFAULT 0,
+      docCliente TEXT,
+      endCliente TEXT,
+      atualizado TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS')),
+      criadoEm TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+    )
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS config (
+      chave TEXT PRIMARY KEY,
+      valor TEXT NOT NULL,
+      atualizado TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+    )
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS atividades (
+      id SERIAL PRIMARY KEY,
+      slug TEXT,
+      tipo TEXT NOT NULL,
+      descricao TEXT NOT NULL,
+      criadoEm TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+    )
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+      slug TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      nome TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      criadoEm TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+    )
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      token TEXT PRIMARY KEY,
+      user_slug TEXT NOT NULL,
+      expires TEXT NOT NULL,
+      criadoEm TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+    )
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS sites_cache (
+      slug TEXT PRIMARY KEY,
+      htmlOriginal TEXT,
+      htmlRedesenhado TEXT,
+      htmlEditor TEXT,
+      screenshots TEXT,
+      atualizado TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+    )
+  `);
 }
 
 export async function initDb(): Promise<void> {
-  if(initialized) return; const dbPath = getDbPath(); const dir=path.dirname(dbPath); if(!fs.existsSync(dir))fs.mkdirSync(dir,{recursive:true});
-  SQL=await initSqlJs(); if(fs.existsSync(dbPath)){db=new SQL.Database(fs.readFileSync(dbPath))}else{db=new SQL.Database()}
-  initSchema(); initialized=true;
+  if (initialized) return;
+  pool = new Pool({ connectionString: DATABASE_URL(), ssl: { rejectUnauthorized: false } });
+  await initSchema();
+  initialized = true;
 }
 
-export function getDb(): any { if(!initialized) throw new Error('Database not initialized'); return wrapDb(db); }
-export function closeDb(): void { if(db){saveDb();db.close();initialized=false} }
+export function getDb(): any {
+  return wrapDb(getPool());
+}
+
+export async function closeDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    initialized = false;
+  }
+}
