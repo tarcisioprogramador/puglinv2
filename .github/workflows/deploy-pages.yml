@@ -42,7 +42,7 @@ jobs:
         run: npm run build:prod
         env:
           VITE_BASE_URL: /puglinv2/
-          VITE_API_URL: https://prospector-v2.onrender.com
+          VITE_API_URL: https://prospector-v2-production.up.railway.app
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
