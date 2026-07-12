@@ -15,16 +15,11 @@ router.post('/search', async (req: Request, res: Response) => {
   try {
     const { nicho, cidade, quantidade = 10 } = req.body;
     if (!nicho || !cidade) return res.status(400).json({ success: false, error: 'Nicho e cidade são obrigatórios' });
-    await getDb().prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES ($1,$2,$3)').run('_prospeccao','prospeccao_iniciada',`Prospecção para "${nicho}" em "${cidade}"`);
+    // Redireciona para o fluxo assíncrono (jobId + SSE/polling)
     const jobId = engine.createJob(nicho, cidade, Math.min(quantidade, 50));
-    const sites: any[] = [];
-    const unsub = engine.onEvent(jobId, (ev: any) => {
-      if (ev.type === 'result' && ev.data?.empresa) sites.push(ev.data.empresa);
-      if (ev.type === 'complete' || ev.type === 'error') setTimeout(unsub, 100);
-    });
-    // Wait briefly for results
-    await new Promise(r => setTimeout(r, 3000));
-    res.json({ success: true, data: sites });
+    await getDb().prepare('INSERT INTO atividades (slug,tipo,descricao) VALUES ($1,$2,$3)').run('_prospeccao','prospeccao_iniciada',`Prospecção para "${nicho}" em "${cidade}"`);
+    // Retorna o jobId imediatamente para o frontend acompanhar via SSE/polling
+    res.json({ success: true, data: { jobId, message: 'Prospecção iniciada' } });
   } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 

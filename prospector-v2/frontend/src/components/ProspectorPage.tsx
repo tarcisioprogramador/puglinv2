@@ -46,7 +46,7 @@ export default function ProspectorPage({ onImport }: Props) {
   const [error, setError] = useState('');
   const logsRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const pollIntervalRef = useRef<number | null>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
   const [selectedTab, setSelectedTab] = useState<'todos' | 'qualificados' | 'descartados'>('qualificados');
   const [copiado, setCopiado] = useState(false);
@@ -93,8 +93,11 @@ export default function ProspectorPage({ onImport }: Props) {
 
       setLogs(prev => [...prev, '🔄 Conectando ao serviço de prospecção...']);
 
-      // Connect to SSE (use relative URL - works via Vite proxy in dev and Express in prod)
-      const url = `/api/prospects/prospectar/${jobId}/stream`;
+      // Connect to SSE - usa URL absoluta em produção (GitHub Pages), relativa em dev (Vite proxy)
+      const API_URL = import.meta.env.VITE_API_URL || '';
+      const url = API_URL
+        ? `${API_URL}/api/prospects/prospectar/${jobId}/stream`
+        : `/api/prospects/prospectar/${jobId}/stream`;
       
       const es = new EventSource(url);
       eventSourceRef.current = es;

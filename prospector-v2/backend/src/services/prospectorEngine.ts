@@ -142,6 +142,7 @@ class ProspectorEngine {
       layoutModerno: false, responsivo: false, conteudoOrganizado: false,
       temProvaSocial: false, temEmail: false, emailsEncontrados: [],
       temTelefone: false, copyrightAno: null, titulo: '', descricao: '',
+      problemas: { layoutAntigo: false, semCta: false, naoResponsivo: false, subdominio: false },
       ...extra,
     };
   }
@@ -254,15 +255,15 @@ class ProspectorEngine {
 
     await db.run(
       `INSERT INTO leads
-      (slug, nome, nicho, cidade, nota, avaliacoes, telefone, whatsapp, siteAntigo, motivo, status, email)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      (slug, nome, nicho, cidade, nota, avaliacoes, telefone, whatsapp, siteAntigo, motivo, status, email, endCliente)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (slug) DO NOTHING`,
       [
         slug, biz.nome, job.nicho, job.cidade,
         biz.nota, biz.avaliacoes,
         biz.telefone || null, biz.whatsapp || null,
         biz.site || null, analysis.motivos.join('; '),
-        'novo', email,
+        'novo', email, biz.endereco || null,
       ]
     );
   }

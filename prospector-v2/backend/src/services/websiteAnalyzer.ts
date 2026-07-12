@@ -17,6 +17,13 @@ export interface SiteAnalysis {
   copyrightAno: number | null;
   titulo: string;
   descricao: string;
+  // Problemas explícitos para contagem
+  problemas: {
+    layoutAntigo: boolean;
+    semCta: boolean;
+    naoResponsivo: boolean;
+    subdominio: boolean;
+  };
 }
 
 const SUBDOMINIOS_GRATIS = [
@@ -73,6 +80,12 @@ export async function analyzeWebsite(url: string, browserInstance?: Browser): Pr
     copyrightAno: null,
     titulo: '',
     descricao: '',
+    problemas: {
+      layoutAntigo: false,
+      semCta: false,
+      naoResponsivo: false,
+      subdominio: false,
+    },
   };
 
   // Validate URL
@@ -90,6 +103,7 @@ export async function analyzeWebsite(url: string, browserInstance?: Browser): Pr
   // Check if subdomain (free hosting)
   if (isSubdomainGratuito(fullUrl)) {
     result.subdominioGratis = true;
+    result.problemas.subdominio = true;
     result.motivos.push('Usa subdomínio gratuito (site amador)');
     result.score += 30;
   }
@@ -153,6 +167,7 @@ export async function analyzeWebsite(url: string, browserInstance?: Browser): Pr
     }
 
     if (!result.temCta) {
+      result.problemas.semCta = true;
       result.motivos.push('Falta de CTA (botões de ação)');
       result.score += 25;
     }
@@ -172,6 +187,7 @@ export async function analyzeWebsite(url: string, browserInstance?: Browser): Pr
     if (modernCount >= 3) {
       result.layoutModerno = true;
     } else {
+      result.problemas.layoutAntigo = true;
       result.motivos.push('Layout parece desatualizado');
       result.score += 20;
     }
@@ -191,10 +207,12 @@ export async function analyzeWebsite(url: string, browserInstance?: Browser): Pr
         if (vp) {
           result.responsivo = true;
         } else {
+          result.problemas.naoResponsivo = true;
           result.motivos.push('Site não é responsivo (não adaptado para mobile)');
           result.score += 20;
         }
       } else {
+        result.problemas.naoResponsivo = true;
         result.motivos.push('Site não é responsivo (não adaptado para mobile)');
         result.score += 20;
       }
@@ -251,24 +269,29 @@ export async function analyzeWebsite(url: string, browserInstance?: Browser): Pr
       }
     }
 
-    // 10. Check for old-looking design via screenshot analysis
-    // Simplified: check if there are excessive inline styles (sign of old WYSIWYG editor)
+    // 10. Check for old-looking design via excessive inline styles
     const inlineStyles = (html.match(/style\s*=\s*["'][^"']*["']/g) || []).length;
     if (inlineStyles > 50) {
-      if (!result.motivos.includes('Layout parece desatualizado')) {
+      if (!result.problemas.layoutAntigo) {
+        result.problemas.layoutAntigo = true;
         result.motivos.push('Layout parece desatualizado');
         result.score += 20;
       }
     }
 
     // --- Final Qualification ---
-    
-    // A site is qualified (needs our services) if:
-    // - It's functional (loaded successfully) AND
-    // - Has problems (score >= 40) OR uses free subdomain
-    const siteComProblemas = result.score >= 40 || result.subdominioGratis;
+    // Count explicit problems: at least 2 of 4 = qualified
+    const problemasCount = [
+      result.problemas.layoutAntigo,
+      result.problemas.semCta,
+      result.problemas.naoResponsivo,
+      result.problemas.subdominio,
+    ].filter(Boolean).length;
 
-    if (result.siteFuncional && siteComProblemas) {
+    // A site is qualified if:
+    // - It loaded successfully AND
+    // - Has at least 2 problems detected
+    if (result.siteFuncional && problemasCount >= 2) {
       result.qualificado = true;
     }
 
