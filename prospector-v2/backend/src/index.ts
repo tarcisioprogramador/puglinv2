@@ -1,10 +1,11 @@
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
 import express from 'express';
 import cors from 'cors';
-import { initDb, closeDb } from './database';
+import { initDb, closeDb, getDb } from './database';
 import { authMiddleware } from './middleware/auth';
 import authRouter from './routes/auth';
 import leadsRouter from './routes/leads';
@@ -24,14 +25,14 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors({
   origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
+    const envFrontend = process.env.FRONTEND_URL || 'http://localhost:5173';
     const allowedOrigins = [
-      process.env.FRONTEND_URL || 'http://localhost:5173',
+      ...envFrontend.split(',').map(s => s.trim()),
       'https://prospector-v2.onrender.com',
       'https://tarcisioprogramador.github.io',
       'http://localhost:5173',
       'http://localhost:4173',
     ];
-    // Permite requisições sem origin (ex: Postman, apps mobile)
     if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
       callback(null, true);
     } else {
@@ -73,7 +74,7 @@ app.use(express.static(frontendDist));
 // Catch-all: serve index.html for SPA client-side routing
 app.get('*', (_req, res) => {
   const indexPath = path.join(frontendDist, 'index.html');
-  if (require('fs').existsSync(indexPath)) {
+  if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
     res.status(200).json({ success: true, message: 'Prospector v2 API rodando' });
@@ -87,9 +88,38 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 async function start() {
   await initDb();
+  await ensureAdmin();
   app.listen(PORT, () => {
     console.log(`\n🔐 Prospector de Sites v2 - API rodando em http://localhost:${PORT}\n`);
   });
+}
+
+async function ensureAdmin() {
+  try {
+    const bcrypt = require('bcryptjs');
+    const db = getDb();
+    const email = 'admin@admin.com';
+    const senha = 'Admin@123';
+    const nome = 'Admin';
+    const slug = email.replace(/[^a-z0-9]/g, '-');
+    const existing = await db.prepare('SELECT * FROM usuarios WHERE email = $1').get(email) as any;
+    if (existing) {
+      const valid = await bcrypt.compare(senha, existing.hash);
+      if (!valid) {
+        const salt = await bcrypt.genSalt(10);
+        const hash = await bcrypt.hash(senha, salt);
+        await db.prepare('UPDATE usuarios SET hash = $1, nome = $2 WHERE email = $3').run(hash, nome, email);
+        console.log('🔧 Admin password atualizado para Admin@123');
+      }
+    } else {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash(senha, salt);
+      await db.prepare('INSERT INTO usuarios (slug, email, nome, hash) VALUES ($1, $2, $3, $4)').run(slug, email, nome, hash);
+      console.log('✅ Admin criado: admin@admin.com / Admin@123');
+    }
+  } catch (e: any) {
+    console.error('⚠️ Erro ao configurar admin:', e.message);
+  }
 }
 start().catch(console.error);
 

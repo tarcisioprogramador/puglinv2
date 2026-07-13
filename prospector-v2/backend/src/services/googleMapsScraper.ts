@@ -1,5 +1,4 @@
-import { chromium } from 'playwright';
-import path from 'path';
+import { chromium, Browser } from 'playwright';
 
 export interface BusinessResult {
   nome: string;
@@ -25,6 +24,10 @@ function extractPhoneNumbers(text: string): { telefone: string; whatsapp: string
   return { telefone, whatsapp: whatsapp ? `55${whatsapp}` : '' };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export async function searchGoogleMaps(
   nicho: string,
   cidade: string,
@@ -32,21 +35,13 @@ export async function searchGoogleMaps(
   onProgress: ProgressCallback
 ): Promise<BusinessResult[]> {
   const results: BusinessResult[] = [];
-  let browser;
+  let browser: Browser | undefined;
 
   try {
-    onProgress({ type: 'log', message: '🔄 Iniciando navegador automatizado...' });
-    
+    onProgress({ type: 'log', message: '🔄 Iniciando navegador...' });
     browser = await chromium.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--window-size=1920,1080',
-        '--lang=pt-BR',
-      ],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
 
     const context = await browser.newContext({
@@ -56,178 +51,151 @@ export async function searchGoogleMaps(
     });
 
     const page = await context.newPage();
-    
+
+    // === STRATEGY 1: Google Maps listing (get names + ratings) ===
     onProgress({ type: 'log', message: `🔍 Buscando "${nicho} em ${cidade}" no Google Maps...` });
+    const query = encodeURIComponent(`${nicho} em ${cidade}`);
 
-    // Navigate to Google Maps
-    await page.goto('https://www.google.com/maps', { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(2000);
-
-    // Accept cookies if present
     try {
-      const cookieBtn = await page.$('button:has-text("Aceitar")');
-      if (cookieBtn) await cookieBtn.click();
-      await page.waitForTimeout(1000);
-    } catch {}
+      await page.goto(`https://www.google.com/maps/search/${query}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await sleep(8000);
 
-    // Search for the query
-    const searchInput = await page.$('input#searchboxinput, input[aria-label*="Pesquisar"]');
-    if (!searchInput) {
-      throw new Error('Campo de busca não encontrado no Google Maps');
-    }
+      const mapsItems = await page.$$('a[href*="maps/place"]');
+      onProgress({ type: 'log', message: `📋 ${mapsItems.length} resultados encontrados no Maps` });
 
-    await searchInput.click();
-    await searchInput.fill(`${nicho} em ${cidade}`);
-    await searchInput.press('Enter');
-    
-    onProgress({ type: 'log', message: '⏳ Aguardando resultados...' });
-    await page.waitForTimeout(4000);
+      for (let i = 0; i < Math.min(mapsItems.length, quantidade + 5); i++) {
+        try {
+          const links = await page.$$('a[href*="maps/place"]');
+          if (i >= links.length) break;
+          const link = links[i];
 
-    // Wait for results panel to load
-    try {
-      await page.waitForSelector('div[role="feed"]', { timeout: 15000 });
-    } catch {
-      try {
-        await page.waitForSelector('a[href*="maps/place"]', { timeout: 10000 });
-      } catch {
-        throw new Error('Nenhum resultado encontrado. Tente um termo de busca diferente.');
+          const nome = await link.getAttribute('aria-label') || '';
+          if (!nome || results.some(r => r.nome === nome)) continue;
+
+          let nota = 0;
+          let avaliacoes = 0;
+          try {
+            const info = await link.evaluate((el: Element) => {
+              const parent = el.closest('div[jsaction]');
+              const img = parent ? parent.querySelector('span[role="img"]') : null;
+              return img ? img.getAttribute('aria-label') || '' : '';
+            });
+            if (info) {
+              const rm = info.match(/(\d[,.]\d)/);
+              if (rm) nota = parseFloat(rm[0].replace(',', '.'));
+              const revm = info.match(/(\d+)\s*(avalia|review)/i);
+              if (revm) avaliacoes = parseInt(revm[1]);
+            }
+          } catch {}
+
+          results.push({ nome, nota, avaliacoes, endereco: '', telefone: '', site: '', whatsapp: '', categoria: '' });
+        } catch { continue; }
       }
+    } catch (e: any) {
+      onProgress({ type: 'log', message: `⚠️ Maps: ${e.message}` });
     }
 
-    onProgress({ type: 'log', message: '📋 Coletando empresas...' });
+    // === STRATEGY 2: Search for each business details via Bing ===
+    if (results.length > 0) {
+      onProgress({ type: 'log', message: '🔎 Buscando contatos via Bing...' });
 
-    // Scroll to load more results
-    const maxScrolls = Math.ceil(quantidade / 5) + 5;
-    let previousCount = 0;
-    
-    for (let scroll = 0; scroll < maxScrolls; scroll++) {
-      // Get all result items
-      const items = await page.$$('a[href*="maps/place"]');
-      
-      if (items.length > previousCount) {
+      for (let i = 0; i < results.length; i++) {
+        const biz = results[i];
+        try {
+          await page.goto(
+            `https://www.bing.com/search?q=${encodeURIComponent(`${biz.nome} ${cidade} telefone site`)}&setlang=pt-BR`,
+            { waitUntil: 'domcontentloaded', timeout: 15000 }
+          );
+          await sleep(2000);
+
+          const details = await page.evaluate(() => {
+            const text = document.body.innerText || '';
+            const html = document.body.innerHTML || '';
+
+            const phoneMatch = text.match(/\(?\d{2}\)?\s*\d{4,5}-?\d{4}/);
+            const telefone = phoneMatch ? phoneMatch[0] : '';
+
+            const siteLinks = document.querySelectorAll('a[href^="http"]:not([href*="bing.com"]):not([href*="microsoft"]):not([href*="go.microsoft"])');
+            let site = '';
+            for (const a of Array.from(siteLinks)) {
+              const href = (a as HTMLAnchorElement).href;
+              if (href && !href.includes('bing.com') && !href.includes('microsoft')) {
+                site = href;
+                break;
+              }
+            }
+
+            return { telefone, site };
+          });
+
+          if (details.telefone) {
+            const { telefone, whatsapp } = extractPhoneNumbers(details.telefone);
+            biz.telefone = telefone;
+            biz.whatsapp = whatsapp;
+          }
+          if (details.site) biz.site = details.site;
+        } catch {}
+
         onProgress({
           type: 'progress',
-          message: `Encontradas ${items.length} empresas...`,
-          data: { encontradas: items.length }
+          message: `Verificando ${i + 1}/${results.length}: ${biz.nome}...`,
+          data: { current: i + 1, total: results.length }
         });
-        previousCount = items.length;
-      }
-
-      if (items.length >= quantidade + 10) break;
-
-      // Scroll the results panel
-      const feed = await page.$('div[role="feed"]');
-      if (feed) {
-        await feed.evaluate(el => el.scrollBy(0, 800));
-        await page.waitForTimeout(1500);
-      } else {
-        await page.evaluate(() => window.scrollBy(0, 800));
-        await page.waitForTimeout(1500);
       }
     }
 
-    // Extract data from each result
-    const resultLinks = await page.$$('a[href*="maps/place"]');
-    const limit = Math.min(resultLinks.length, quantidade + 5);
-    
-    for (let i = 0; i < limit; i++) {
-      try {
-        const links = await page.$$('a[href*="maps/place"]');
-        if (i >= links.length) break;
-        
-        const link = links[i];
-        
-        // Get basic info from the result card
-        const nameEl = await link.$('.fontHeadlineSmall, .qBF1Pd, .fontBodyMedium > span');
-        const nome = nameEl ? await nameEl.innerText() : '';
-        
-        if (!nome || results.some(r => r.nome === nome)) continue;
+    // === STRATEGY 3: If no results from Maps, do Bing search ===
+    if (results.length === 0) {
+      onProgress({ type: 'log', message: '🔄 Buscando via Bing Search...' });
+      await page.goto(
+        `https://www.bing.com/search?q=${encodeURIComponent(`${nicho} em ${cidade} telefone site`)}&setlang=pt-BR&count=20`,
+        { waitUntil: 'domcontentloaded', timeout: 30000 }
+      );
+      await sleep(3000);
 
-        // Get rating and review count
-        const ratingEl = await link.$('span[aria-label*="estrelas"], span[role="img"]');
-        let nota = 0;
-        let avaliacoes = 0;
-        
-        if (ratingEl) {
-          const ariaLabel = await ratingEl.getAttribute('aria-label') || '';
-          const ratingMatch = ariaLabel.match(/(\d[,.]\d)/);
-          if (ratingMatch) nota = parseFloat(ratingMatch[0].replace(',', '.'));
-          const reviewMatch = ariaLabel.match(/(\d+) avalia/);
-          if (reviewMatch) avaliacoes = parseInt(reviewMatch[1]);
-        }
-
-        // If doesn't meet minimum criteria, skip
-        if (nota < 4.7 || avaliacoes < 40) continue;
-
-        // Click to open details panel
-        await link.click();
-        await page.waitForTimeout(2000);
-
-        // Extract phone and website from the details panel
-        let telefone = '';
-        let site = '';
-        let whatsapp = '';
-        let endereco = '';
-        let categoria = '';
-
-        // Get address
-        try {
-          const addressEl = await page.$('button[data-tooltip*="endereço"] span, button:has-text("endereço")');
-          if (addressEl) endereco = (await addressEl.innerText()).trim();
-        } catch {}
-
-        // Get phone
-        try {
-          const phoneEl = await page.$('button[data-tooltip*="telefone"] span, button:has-text("telefone")');
-          if (phoneEl) telefone = (await phoneEl.innerText()).trim();
-        } catch {}
-
-        // Get website
-        try {
-          const siteEl = await page.$('a[data-tooltip*="site"] span, a:has-text("Site")');
-          if (siteEl) site = (await siteEl.innerText()).trim();
-          
-          if (!site) {
-            const siteBtn = await page.$('a[data-tooltip*="site"], a[href*="http"]:not([href*="maps"])');
-            if (siteBtn) site = await siteBtn.getAttribute('href') || '';
+      const searchResults = await page.evaluate(() => {
+        const items: Array<{ nome: string; telefone: string; site: string; endereco: string }> = [];
+        document.querySelectorAll('#b_results > li.b_algo, .b_algo').forEach((el) => {
+          const h2 = el.querySelector('h2');
+          const nome = h2?.textContent?.trim() || '';
+          const text = (el as HTMLElement).innerText || '';
+          const phoneMatch = text.match(/\(?\d{2}\)\s*\d{4,5}-?\d{4}/);
+          const telefone = phoneMatch ? phoneMatch[0] : '';
+          const link = el.querySelector('a') as HTMLAnchorElement;
+          const site = link?.href || '';
+          if (nome && !nome.includes('Bing') && !nome.includes('Microsoft')) {
+            items.push({ nome, telefone, site, endereco: '' });
           }
-        } catch {}
+        });
+        return items;
+      });
 
-        // Get category
-        try {
-          const catEl = await page.$('button[jsaction*="category"] span, button:has-text("Prestador de servi")');
-          if (catEl) categoria = (await catEl.innerText()).trim();
-        } catch {}
-
-        // Extract WhatsApp from phone
-        const phones = extractPhoneNumbers(telefone + ' ' + site);
-        if (phones.whatsapp && !whatsapp) whatsapp = phones.whatsapp;
-        if (phones.telefone && !telefone) telefone = phones.telefone;
-
-        // Skip if no contact info at all
-        if (!telefone && !site && !endereco) continue;
-
-        results.push({ nome, nota, avaliacoes, endereco, telefone, site, whatsapp, categoria });
-
+      for (const r of searchResults) {
+        if (results.some(x => x.nome === r.nome)) continue;
+        const { telefone, whatsapp } = extractPhoneNumbers(r.telefone);
+        results.push({
+          nome: r.nome, nota: 0, avaliacoes: 0,
+          endereco: r.endereco, telefone, site: r.site, whatsapp, categoria: '',
+        });
         onProgress({
           type: 'result',
-          message: `✅ ${nome} — ★ ${nota} (${avaliacoes} avaliações)`,
-          data: { nome, nota, avaliacoes }
+          message: `✅ ${r.nome}${telefone ? ` — ${telefone}` : ''}${r.site ? ` — ${r.site}` : ''}`,
+          data: { nome: r.nome, nota: 0, avaliacoes: 0 }
         });
-
-      } catch (err) {
-        // Skip individual errors
-        continue;
       }
     }
 
-    onProgress({ type: 'log', message: `📊 Coleta finalizada: ${results.length} empresas encontradas com nota ≥ 4.7` });
+    if (results.length === 0) {
+      throw new Error('Nenhum resultado encontrado. Tente outro nicho ou cidade.');
+    }
+
+    onProgress({ type: 'log', message: `📊 Total: ${results.length} empresas encontradas` });
 
   } catch (error: any) {
     onProgress({ type: 'error', message: `❌ Erro na busca: ${error.message}` });
     throw error;
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close().catch(() => {});
   }
 
   return results;

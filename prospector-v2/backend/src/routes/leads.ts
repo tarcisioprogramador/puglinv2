@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { getDb } from '../database';
+import { getDb, SQL_NOW, SQL_DAYS_SINCE } from '../database';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
@@ -36,9 +36,10 @@ router.get('/stats/overview', async (_req: Request, res: Response) => {
     const fechados = (await db.prepare('SELECT COUNT(*) as c FROM leads WHERE status = $1').get('fechado') as any).c;
     const receita = (await db.prepare("SELECT COALESCE(SUM(valor),0) as s FROM leads WHERE status='fechado'").get() as any).s;
     const mrr = (await db.prepare("SELECT COALESCE(SUM(manutencao),0) as s FROM leads WHERE status='fechado'").get() as any).s;
-    const fup = (await db.prepare("SELECT COUNT(*) as c FROM leads WHERE status='proposta' AND dataProposta IS NOT NULL AND CURRENT_DATE - dataProposta::date >= 4").get() as any).c;
+    const daysExpr = SQL_DAYS_SINCE('dataProposta');
+    const fup = (await db.prepare(`SELECT COUNT(*) as c FROM leads WHERE status='proposta' AND dataProposta IS NOT NULL AND ${daysExpr} >= 4`).get() as any).c;
     const funnel = await db.prepare("SELECT status, COUNT(*) as quantidade FROM leads WHERE status!='descartado' GROUP BY status ORDER BY CASE status WHEN 'novo' THEN 1 WHEN 'redesenhado' THEN 2 WHEN 'publicado' THEN 3 WHEN 'proposta' THEN 4 WHEN 'respondeu' THEN 5 WHEN 'fechado' THEN 6 END").all();
-    const followups = await db.prepare("SELECT slug,nome,dataProposta,whatsapp FROM leads WHERE status='proposta' AND dataProposta IS NOT NULL AND CURRENT_DATE - dataProposta::date >= 4 ORDER BY dataProposta ASC").all();
+    const followups = await db.prepare(`SELECT slug,nome,dataProposta,whatsapp FROM leads WHERE status='proposta' AND dataProposta IS NOT NULL AND ${daysExpr} >= 4 ORDER BY dataProposta ASC`).all();
     res.json({ success: true, data: { totalLeads, leadsAtivos, propostasEnviadas, followupsPendentes: fup, fechados, receitaFechada: receita, mrr, potencial: leadsAtivos * 700, funnel, followups } });
   } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
@@ -67,7 +68,7 @@ router.put('/:slug', async (req: Request, res: Response) => {
     const updates: string[] = []; const values: any[] = []; let pi = 1;
     for (const c of CAMPOS) { if (data[c] !== undefined && c !== 'slug') { updates.push(`${c}=$${pi++}`); values.push(data[c]); } }
     if (!updates.length) return res.json({ success: true, data: existing });
-    updates.push(`atualizado=to_char(now(),'YYYY-MM-DD HH24:MI:SS')`); values.push(slug);
+    updates.push(`atualizado=${SQL_NOW()}`); values.push(slug);
     await db.prepare(`UPDATE leads SET ${updates.join(',')} WHERE slug=$${pi}`).run(...values);
     res.json({ success: true, data: await db.prepare('SELECT * FROM leads WHERE slug=$1').get(slug) });
   } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
@@ -88,7 +89,7 @@ router.patch('/batch', async (req: Request, res: Response) => {
     if (!slugs?.length || !data) return res.status(400).json({ success: false, error: 'slugs e data obrigatórios' });
     const fields = Object.keys(data).filter(k => k !== 'slug').map((k, i) => `${k}=$${i + 1}`); const vals = Object.keys(data).filter(k => k !== 'slug').map(k => data[k]);
     if (!fields.length) return res.json({ success: true, message: 'Nada p/ atualizar' });
-    fields.push(`atualizado=to_char(now(),'YYYY-MM-DD HH24:MI:SS')`);
+    fields.push(`atualizado=${SQL_NOW()}`);
     await db.transaction(async () => {
       for (const slug of slugs) {
         await db.prepare(`UPDATE leads SET ${fields.join(',')} WHERE slug=$${fields.length + 1}`).run(...vals, slug);

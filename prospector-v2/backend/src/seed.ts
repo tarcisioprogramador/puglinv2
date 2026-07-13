@@ -17,9 +17,9 @@ async function seed() {
   if (existing?.c > 0) {
     console.log('⚠️  Já existe um usuário cadastrado. Pulando criação de admin.\n');
   } else {
-    const email = process.env.SEED_EMAIL || 'tarcisioconsultorsaude@gmail.com';
-    const senha = process.env.SEED_SENHA || 'Mel@2502';
-    const nome = process.env.SEED_NOME || 'Tarcísio';
+    const email = process.env.SEED_EMAIL || 'admin@admin.com';
+    const senha = process.env.SEED_SENHA || 'Admin@123';
+    const nome = process.env.SEED_NOME || 'Admin';
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(senha, salt);

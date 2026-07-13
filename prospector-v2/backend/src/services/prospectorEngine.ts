@@ -163,7 +163,7 @@ class ProspectorEngine {
       });
 
       if (businesses.length === 0) {
-        this.addLog(jobId, '⚠️ Nenhuma empresa encontrada com os critérios mínimos (nota ≥ 4.7, ≥ 40 avaliações)');
+        this.addLog(jobId, '⚠️ Nenhuma empresa encontrada para essa busca');
         this.updateJob(jobId, { status: 'complete', completedAt: new Date().toISOString() });
         this.emit(jobId, { type: 'complete', data: {} });
         return;
@@ -191,12 +191,12 @@ class ProspectorEngine {
             sa = this.emptyAnalysis({ motivos: ['Sem site próprio'] });
           }
 
-          const qualificado = sa.qualificado;
-          if (qualificado) this.addLog(jobId, `✅ ${biz.nome} — QUALIFICADO (score: ${sa.score})`);
+          const qualificado: boolean = !!sa.qualificado || (!biz.site && (!!biz.telefone || !!biz.whatsapp));
+          if (qualificado) this.addLog(jobId, `✅ ${biz.nome} — QUALIFICADO${sa.score > 0 ? ` (score: ${sa.score})` : ' (sem site)'}`);
           else this.addLog(jobId, `⏭️ ${biz.nome} — ${sa.motivos[0] || 'Descartado'}`);
 
           let jaImportado = false;
-          if (qualificado && biz.site) {
+          if (qualificado && (biz.site || biz.telefone || biz.whatsapp)) {
             try {
               await this.saveLead(jobId, biz, sa);
               jaImportado = true;
