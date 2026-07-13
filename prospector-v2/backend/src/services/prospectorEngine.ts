@@ -191,12 +191,12 @@ class ProspectorEngine {
             sa = this.emptyAnalysis({ motivos: ['Sem site próprio'] });
           }
 
-          const qualificado: boolean = !!sa.qualificado || (!biz.site && (!!biz.telefone || !!biz.whatsapp));
-          if (qualificado) this.addLog(jobId, `✅ ${biz.nome} — QUALIFICADO${sa.score > 0 ? ` (score: ${sa.score})` : ' (sem site)'}`);
+          const qualificado: boolean = true;
+          if (qualificado) this.addLog(jobId, `✅ ${biz.nome} — QUALIFICADO${sa.score > 0 ? ` (score: ${sa.score})` : biz.site ? ' (site analisado)' : ' (sem site)'}`);
           else this.addLog(jobId, `⏭️ ${biz.nome} — ${sa.motivos[0] || 'Descartado'}`);
 
           let jaImportado = false;
-          if (qualificado && (biz.site || biz.telefone || biz.whatsapp)) {
+          if (biz.site || biz.telefone || biz.whatsapp || biz.endereco) {
             try {
               await this.saveLead(jobId, biz, sa);
               jaImportado = true;

@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && npx --yes playwright install --with-deps chromium",
+    "build": "tsc",
     "start": "node dist/index.js",
+    "postinstall": "npx --yes playwright install --with-deps chromium",
     "db:init": "tsx src/database.ts --init",
     "seed": "tsx src/seed.ts",
     "test": "vitest run",

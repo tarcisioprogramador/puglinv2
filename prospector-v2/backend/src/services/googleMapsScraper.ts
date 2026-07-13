@@ -1,4 +1,5 @@
 import { chromium, Browser } from 'playwright';
+import * as cheerio from 'cheerio';
 
 export interface BusinessResult {
   nome: string;
@@ -28,6 +29,39 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function fetchDuckDuckGo(query: string): Promise<string> {
+  const resp = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      'Accept': 'text/html',
+      'Accept-Language': 'pt-BR,pt;q=0.9',
+    },
+  });
+  return resp.text();
+}
+
+function parseDuckDuckGoResults(html: string): { telefone: string; site: string; endereco: string } {
+  const $ = cheerio.load(html);
+  const result = { telefone: '', site: '', endereco: '' };
+  const bodyText = $.text();
+  const phoneMatch = bodyText.match(/\(?\d{2}\)?\s*\d{4,5}-?\d{4}/);
+  if (phoneMatch) result.telefone = phoneMatch[0];
+  const addrMatch = bodyText.match(/(Rua|Av\.|Avenida|Alameda|Travessa|Estrada|Rodovia)\s+[^,.\n]+/i);
+  if (addrMatch) result.endereco = addrMatch[0].trim();
+  $('.result__url, .result__a').each((_, el) => {
+    if (result.site) return;
+    let href = $(el).attr('href') || '';
+    if (href.includes('uddg=')) {
+      const match = href.match(/uddg=([^&]+)/);
+      if (match) href = decodeURIComponent(match[1]);
+    }
+    if (href.startsWith('http') && !href.includes('duckduckgo') && !href.includes('google') && !href.includes('facebook') && !href.includes('instagram')) {
+      result.site = href;
+    }
+  });
+  return result;
+}
+
 export async function searchGoogleMaps(
   nicho: string,
   cidade: string,
@@ -52,7 +86,7 @@ export async function searchGoogleMaps(
 
     const page = await context.newPage();
 
-    // === STRATEGY 1: Google Maps listing (get names + ratings) ===
+    // === STEP 1: Google Maps → names + ratings + details from feed ===
     onProgress({ type: 'log', message: `🔍 Buscando "${nicho} em ${cidade}" no Google Maps...` });
     const query = encodeURIComponent(`${nicho} em ${cidade}`);
 
@@ -60,128 +94,168 @@ export async function searchGoogleMaps(
       await page.goto(`https://www.google.com/maps/search/${query}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await sleep(8000);
 
-      const mapsItems = await page.$$('a[href*="maps/place"]');
-      onProgress({ type: 'log', message: `📋 ${mapsItems.length} resultados encontrados no Maps` });
+      // Scroll the feed to load more results
+      try {
+        const feed = await page.$('div[role="feed"]');
+        if (feed) {
+          for (let s = 0; s < 5; s++) {
+            await feed.evaluate((el) => el.scrollBy(0, 800));
+            await sleep(1500);
+          }
+        }
+      } catch {}
 
-      for (let i = 0; i < Math.min(mapsItems.length, quantidade + 5); i++) {
-        try {
-          const links = await page.$$('a[href*="maps/place"]');
-          if (i >= links.length) break;
-          const link = links[i];
+      // Extract full business data from Maps listing cards
+      const mapsData = await page.evaluate(() => {
+        const items: Array<{
+          nome: string; nota: number; avaliacoes: number; endereco: string;
+          telefone: string; site: string; categoria: string;
+        }> = [];
 
-          const nome = await link.getAttribute('aria-label') || '';
-          if (!nome || results.some(r => r.nome === nome)) continue;
+        // Each result is an anchor with maps/place in href
+        const links = document.querySelectorAll('a[href*="maps/place"]');
 
+        links.forEach((link) => {
+          const nome = link.getAttribute('aria-label') || '';
+          if (!nome) return;
+
+          // Rating
           let nota = 0;
           let avaliacoes = 0;
-          try {
-            const info = await link.evaluate((el: Element) => {
-              const parent = el.closest('div[jsaction]');
-              const img = parent ? parent.querySelector('span[role="img"]') : null;
-              return img ? img.getAttribute('aria-label') || '' : '';
-            });
-            if (info) {
-              const rm = info.match(/(\d[,.]\d)/);
+          const parent = link.closest('div[jsaction]');
+          if (parent) {
+            const img = parent.querySelector('span[role="img"]');
+            if (img) {
+              const label = img.getAttribute('aria-label') || '';
+              const rm = label.match(/(\d[,.]\d)/);
               if (rm) nota = parseFloat(rm[0].replace(',', '.'));
-              const revm = info.match(/(\d+)\s*(avalia|review)/i);
+              const revm = label.match(/(\d+)\s*(avalia|review)/i);
               if (revm) avaliacoes = parseInt(revm[1]);
             }
-          } catch {}
 
-          results.push({ nome, nota, avaliacoes, endereco: '', telefone: '', site: '', whatsapp: '', categoria: '' });
-        } catch { continue; }
+            // Extract from the card text
+            const cardText = parent.textContent || '';
+
+            // Phone
+            const phoneMatch = cardText.match(/\(?\d{2}\)\s*\d{4,5}-?\d{4}/);
+            const telefone = phoneMatch ? phoneMatch[0] : '';
+
+            // Address
+            const addrMatch = cardText.match(/(Rua|Av\.|Avenida|Alameda|Travessa|Estrada|Rodovia)[^,\n]+/i);
+            const endereco = addrMatch ? addrMatch[0].trim() : '';
+
+            // Category
+            const catMatch = cardText.match(/(Restaurante|Pizzaria|Hambúrguer|Padaria|Cafeteria|Salão|Barbearia|Farmácia|Clínica|Loja|Oficina|Mecânico|Hotel|Pousada)/i);
+            const categoria = catMatch ? catMatch[0] : '';
+
+            items.push({ nome, nota, avaliacoes, endereco, telefone, site: '', categoria });
+          } else {
+            items.push({ nome, nota, avaliacoes, endereco: '', telefone: '', site: '', categoria: '' });
+          }
+        });
+
+        return items;
+      });
+
+      onProgress({ type: 'log', message: `📋 ${mapsData.length} resultados encontrados no Maps` });
+
+      // Click each result to extract phone/site from detail panel
+      for (let i = 0; i < Math.min(mapsData.length, quantidade + 5); i++) {
+        const data = mapsData[i];
+        if (!data.nome || results.some(r => r.nome === data.nome)) continue;
+
+        // Try clicking to get more details (with timeout)
+        try {
+          const links = await page.$$('a[href*="maps/place"]');
+          if (i < links.length) {
+            await links[i].click();
+            await sleep(2500);
+
+            const detail = await page.evaluate(() => {
+              const body = document.body.innerText || '';
+              const html = document.body.innerHTML || '';
+
+              let telefone = '';
+              const phoneBtns = document.querySelectorAll('button[data-tooltip*="telefone"], button[data-tooltip*="phone"]');
+              for (const btn of Array.from(phoneBtns)) {
+                const span = btn.querySelector('span');
+                if (span && span.textContent) { telefone = span.textContent.trim(); break; }
+              }
+              if (!telefone) {
+                const pm = body.match(/\(?\d{2}\)\s*\d{4,5}-?\d{4}/);
+                if (pm) telefone = pm[0];
+              }
+
+              let site = '';
+              const siteLinks = document.querySelectorAll('a[data-tooltip*="http"], a[data-item-id*="authority"]');
+              for (const a of Array.from(siteLinks)) {
+                const href = (a as HTMLAnchorElement).href;
+                if (href && !href.includes('google.com') && !href.includes('maps.google')) {
+                  site = href; break;
+                }
+              }
+
+              let endereco = '';
+              const addrBtns = document.querySelectorAll('button[data-tooltip*="endere"], button[data-tooltip*="address"]');
+              for (const btn of Array.from(addrBtns)) {
+                const span = btn.querySelector('span');
+                if (span && span.textContent && span.textContent.length > 5) {
+                  endereco = span.textContent.trim(); break;
+                }
+              }
+
+              return { telefone, site, endereco };
+            });
+
+            if (detail.telefone && !data.telefone) data.telefone = detail.telefone;
+            if (detail.site && !data.site) data.site = detail.site;
+            if (detail.endereco && !data.endereco) data.endereco = detail.endereco;
+          }
+        } catch {}
+
+        results.push({
+          nome: data.nome, nota: data.nota, avaliacoes: data.avaliacoes,
+          endereco: data.endereco, telefone: data.telefone, site: data.site,
+          whatsapp: '', categoria: data.categoria,
+        });
       }
     } catch (e: any) {
       onProgress({ type: 'log', message: `⚠️ Maps: ${e.message}` });
     }
 
-    // === STRATEGY 2: Search for each business details via Bing ===
-    if (results.length > 0) {
-      onProgress({ type: 'log', message: '🔎 Buscando contatos via Bing...' });
+    // === STEP 2: DuckDuckGo for businesses missing phone/site ===
+    const missingContact = results.filter(r => !r.telefone && !r.site);
+    if (missingContact.length > 0) {
+      onProgress({ type: 'log', message: `🔎 Buscando contatos para ${missingContact.length} empresas via DuckDuckGo...` });
 
-      for (let i = 0; i < results.length; i++) {
-        const biz = results[i];
+      for (let i = 0; i < missingContact.length; i++) {
+        const biz = missingContact[i];
         try {
-          await page.goto(
-            `https://www.bing.com/search?q=${encodeURIComponent(`${biz.nome} ${cidade} telefone site`)}&setlang=pt-BR`,
-            { waitUntil: 'domcontentloaded', timeout: 15000 }
-          );
-          await sleep(2000);
-
-          const details = await page.evaluate(() => {
-            const text = document.body.innerText || '';
-            const html = document.body.innerHTML || '';
-
-            const phoneMatch = text.match(/\(?\d{2}\)?\s*\d{4,5}-?\d{4}/);
-            const telefone = phoneMatch ? phoneMatch[0] : '';
-
-            const siteLinks = document.querySelectorAll('a[href^="http"]:not([href*="bing.com"]):not([href*="microsoft"]):not([href*="go.microsoft"])');
-            let site = '';
-            for (const a of Array.from(siteLinks)) {
-              const href = (a as HTMLAnchorElement).href;
-              if (href && !href.includes('bing.com') && !href.includes('microsoft')) {
-                site = href;
-                break;
-              }
-            }
-
-            return { telefone, site };
-          });
-
+          const html = await fetchDuckDuckGo(`${biz.nome} ${cidade} telefone site`);
+          const details = parseDuckDuckGoResults(html);
           if (details.telefone) {
             const { telefone, whatsapp } = extractPhoneNumbers(details.telefone);
             biz.telefone = telefone;
             biz.whatsapp = whatsapp;
           }
           if (details.site) biz.site = details.site;
+          if (details.endereco && !biz.endereco) biz.endereco = details.endereco;
         } catch {}
 
         onProgress({
           type: 'progress',
-          message: `Verificando ${i + 1}/${results.length}: ${biz.nome}...`,
-          data: { current: i + 1, total: results.length }
+          message: `Verificando ${i + 1}/${missingContact.length}: ${biz.nome}...`,
+          data: { current: i + 1, total: missingContact.length }
         });
+        await sleep(800);
       }
     }
 
-    // === STRATEGY 3: If no results from Maps, do Bing search ===
-    if (results.length === 0) {
-      onProgress({ type: 'log', message: '🔄 Buscando via Bing Search...' });
-      await page.goto(
-        `https://www.bing.com/search?q=${encodeURIComponent(`${nicho} em ${cidade} telefone site`)}&setlang=pt-BR&count=20`,
-        { waitUntil: 'domcontentloaded', timeout: 30000 }
-      );
-      await sleep(3000);
-
-      const searchResults = await page.evaluate(() => {
-        const items: Array<{ nome: string; telefone: string; site: string; endereco: string }> = [];
-        document.querySelectorAll('#b_results > li.b_algo, .b_algo').forEach((el) => {
-          const h2 = el.querySelector('h2');
-          const nome = h2?.textContent?.trim() || '';
-          const text = (el as HTMLElement).innerText || '';
-          const phoneMatch = text.match(/\(?\d{2}\)\s*\d{4,5}-?\d{4}/);
-          const telefone = phoneMatch ? phoneMatch[0] : '';
-          const link = el.querySelector('a') as HTMLAnchorElement;
-          const site = link?.href || '';
-          if (nome && !nome.includes('Bing') && !nome.includes('Microsoft')) {
-            items.push({ nome, telefone, site, endereco: '' });
-          }
-        });
-        return items;
-      });
-
-      for (const r of searchResults) {
-        if (results.some(x => x.nome === r.nome)) continue;
-        const { telefone, whatsapp } = extractPhoneNumbers(r.telefone);
-        results.push({
-          nome: r.nome, nota: 0, avaliacoes: 0,
-          endereco: r.endereco, telefone, site: r.site, whatsapp, categoria: '',
-        });
-        onProgress({
-          type: 'result',
-          message: `✅ ${r.nome}${telefone ? ` — ${telefone}` : ''}${r.site ? ` — ${r.site}` : ''}`,
-          data: { nome: r.nome, nota: 0, avaliacoes: 0 }
-        });
+    // Fill whatsapp from telefone
+    for (const r of results) {
+      if (!r.whatsapp && r.telefone) {
+        const { whatsapp } = extractPhoneNumbers(r.telefone);
+        r.whatsapp = whatsapp;
       }
     }
 
